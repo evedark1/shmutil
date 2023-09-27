@@ -63,14 +63,14 @@ void shared_memory_pool_free(shared_memory_pool_t *pool, void *ptr)
 
 int32_t shared_memory_pool_offset(shared_memory_pool_t *pool, void *ptr)
 {
-    return (uint8_t *)ptr - pool->data;
+    return ((uint8_t *)ptr - pool->data) / pool->elemsize;
 }
 
 void *shared_memory_pool_pointer(shared_memory_pool_t *pool, int32_t offset)
 {
-    if (offset % pool->elemsize != 0 || offset / pool->elemsize >= pool->count)
+    if (offset >= pool->count)
         return NULL;
-    return pool->data + offset;
+    return pool->data + offset * pool->elemsize;
 }
 
 size_t shared_queue_size(size_t size)
