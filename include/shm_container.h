@@ -1,7 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-#include "shmutil.h"
+#include <pthread.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,12 +11,14 @@ extern "C" {
  * @brief shared memory pool
  */
 typedef struct {
-    size_t elemsize;
-    size_t count;
+    int32_t elemsize;
+    int32_t count;
+    int32_t use_count;
 
     // private field
-    pthread_mutex_t mutex;
     uint32_t flag;
+    int32_t datapos;
+    pthread_spinlock_t mutex;
     int32_t first;
     uint8_t data[0];
 } shared_memory_pool_t;
@@ -27,7 +29,7 @@ typedef struct {
  * @param count element count
  * @return total size
  */
-extern size_t shared_memory_pool_size(size_t elemsize, size_t count);
+extern size_t shared_memory_pool_size(int32_t elemsize, int32_t count, int32_t align);
 
 /**
  * @brief create shared memory pool
@@ -36,7 +38,7 @@ extern size_t shared_memory_pool_size(size_t elemsize, size_t count);
  * @param count element count
  * @return shared memory pool
  */
-extern shared_memory_pool_t *shared_memory_pool_create(void *ptr, size_t elemsize, size_t count);
+extern shared_memory_pool_t *shared_memory_pool_create(void *ptr, int32_t elemsize, int32_t count, int32_t align);
 
 /**
  * @brief open exist shared memory pool
@@ -44,6 +46,12 @@ extern shared_memory_pool_t *shared_memory_pool_create(void *ptr, size_t elemsiz
  * @return shared memory pool
  */
 extern shared_memory_pool_t *shared_memory_pool_open(void *ptr);
+
+/**
+ * @brief clear memory pool, thread safe
+ * @param pool shared memory pool
+ */
+extern void shared_memory_pool_clear(shared_memory_pool_t *pool);
 
 /**
  * @brief malloc from shared memory pool, thread safe
@@ -63,7 +71,7 @@ extern void shared_memory_pool_free(shared_memory_pool_t *pool, void *ptr);
  * @brief get offset in shared memory pool, thread safe
  * @param pool shared memory pool
  * @param ptr pointer malloc by pool
- * @return offset in shared memory pool
+ * @return offset in shared memory pool, -1 on fail
  */
 extern int32_t shared_memory_pool_offset(shared_memory_pool_t *pool, void *ptr);
 

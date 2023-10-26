@@ -42,8 +42,8 @@ void shared_context_create(void *ptr, struct local_context *local)
 {
     struct shared_context *ctx = ptr;
 
-    assert(shared_memory_pool_size(SHARE_ELEMSIZE, 256) < sizeof(ctx->pool_data));
-    local->pool = shared_memory_pool_create(ctx->pool_data, SHARE_ELEMSIZE, 256);
+    assert(shared_memory_pool_size(SHARE_ELEMSIZE, 256, 8) < sizeof(ctx->pool_data));
+    local->pool = shared_memory_pool_create(ctx->pool_data, SHARE_ELEMSIZE, 256, 8);
 
     assert(shared_queue_size(1024) < sizeof(ctx->queue_data));
     local->queue = shared_queue_create(ctx->queue_data, 1024);

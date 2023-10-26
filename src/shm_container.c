@@ -1,35 +1,48 @@
 #include <string.h>
 
+#include "shmutil.h"
 #include "shm_container.h"
 
-static inline size_t align_size(size_t size, size_t align)
+#define POOL_FLAG_END -1
+#define POOL_FLAG_USING -2
+
+static int32_t align_size(int32_t size, int32_t align)
 {
+    // align must be 2^x
+    if ((align & (align - 1)) != 0)
+        return -1;
     return align * ((size + (align - 1)) / align);
 }
 
-size_t shared_memory_pool_size(size_t elemsize, size_t count)
+static int32_t shared_memory_datapos(int32_t count, int32_t align)
 {
-    elemsize = align_size(elemsize, sizeof(void *));
-    return sizeof(shared_memory_pool_t) + elemsize * count;
+    return align_size(sizeof(shared_memory_pool_t) + sizeof(int32_t) * count, align);
 }
 
-shared_memory_pool_t *shared_memory_pool_create(void *ptr, size_t elemsize, size_t count)
+size_t shared_memory_pool_size(int32_t elemsize, int32_t count, int32_t align)
 {
-    shared_memory_pool_t *pool = ptr;
-    pool->elemsize = align_size(elemsize, sizeof(void *));
-    pool->count = count;
+    if (align > 1)
+        elemsize = align_size(elemsize, align);
+    return shared_memory_datapos(count, align) + elemsize * count;
+}
 
-    if (shm_lock_init(&pool->mutex) != 0)
+shared_memory_pool_t *shared_memory_pool_create(void *ptr, int32_t elemsize, int32_t count, int32_t align)
+{
+    if (align > 1)
+        elemsize = align_size(elemsize, align);
+    if (elemsize < 0)
+        return NULL;
+
+    shared_memory_pool_t *pool = ptr;
+    pool->elemsize = elemsize;
+    pool->count = count;
+    pool->use_count = 0;
+
+    if (pthread_spin_init(&pool->mutex, PTHREAD_PROCESS_SHARED) != 0)
         return NULL;
     pool->flag = 0xa1a20304;
-
-    // init freelist link
-    pool->first = 0;
-    for (size_t i = 0; i < count - 1; i++) {
-        *(int *)(pool->data + i * pool->elemsize) = (i + 1) * pool->elemsize;
-    }
-    *(int *)(pool->data + (count - 1) * pool->elemsize) = -1;
-
+    pool->datapos = shared_memory_datapos(count, align) - sizeof(shared_memory_pool_t);
+    shared_memory_pool_clear(pool);
     return pool;
 }
 
@@ -41,36 +54,72 @@ shared_memory_pool_t *shared_memory_pool_open(void *ptr)
     return pool;
 }
 
+void shared_memory_pool_clear(shared_memory_pool_t *pool)
+{
+    pthread_spin_lock(&pool->mutex);
+    int32_t *meta = (int32_t *)pool->data;
+    pool->first = 0;
+    for (int32_t i = 0; i < pool->count - 1; i++) {
+        meta[i] = i + 1;
+    }
+    meta[pool->count - 1] = POOL_FLAG_END;
+    pool->use_count = 0;
+    pthread_spin_unlock(&pool->mutex);
+}
+
 void *shared_memory_pool_malloc(shared_memory_pool_t *pool)
 {
-    pthread_mutex_lock(&pool->mutex);
     void *p = NULL;
+    pthread_spin_lock(&pool->mutex);
+    int32_t *meta = (int32_t *)pool->data;
     if (pool->first >= 0) {
-        p = pool->data + pool->first;
-        pool->first = *(int *)p;
+        int offset = pool->first;
+        pool->first = meta[offset];
+        meta[offset] = POOL_FLAG_USING;
+        p = pool->data + pool->datapos + offset * pool->elemsize;
+        pool->use_count++;
     }
-    pthread_mutex_unlock(&pool->mutex);
+    pthread_spin_unlock(&pool->mutex);
     return p;
 }
 
 void shared_memory_pool_free(shared_memory_pool_t *pool, void *ptr)
 {
-    pthread_mutex_lock(&pool->mutex);
-    *(int *)ptr = pool->first;
-    pool->first = (uint8_t *)ptr - pool->data;
-    pthread_mutex_unlock(&pool->mutex);
+    int offset = shared_memory_pool_offset(pool, ptr);
+    if (offset < 0)
+        return;
+
+    pthread_spin_lock(&pool->mutex);
+    int32_t *meta = (int32_t *)pool->data;
+    meta[offset]= pool->first;
+    pool->first = offset;
+    pool->use_count--;
+    pthread_spin_unlock(&pool->mutex);
 }
 
 int32_t shared_memory_pool_offset(shared_memory_pool_t *pool, void *ptr)
 {
-    return ((uint8_t *)ptr - pool->data) / pool->elemsize;
+    int32_t df = (uint8_t *)ptr - pool->data - pool->datapos;
+    if (df % pool->elemsize != 0)
+        return -1;
+    int32_t offset = df / pool->elemsize;
+    if (offset < 0 || offset >= pool->count)
+        return -1;
+    return offset;
 }
 
 void *shared_memory_pool_pointer(shared_memory_pool_t *pool, int32_t offset)
 {
-    if (offset >= pool->count)
-        return NULL;
-    return pool->data + offset * pool->elemsize;
+    void *ptr = NULL;
+    if (offset < 0 || offset >= pool->count)
+        return ptr;
+
+    pthread_spin_lock(&pool->mutex);
+    int32_t *meta = (int32_t *)pool->data;
+    if (meta[offset] == POOL_FLAG_USING)
+        ptr = pool->data + pool->datapos + offset * pool->elemsize;
+    pthread_spin_unlock(&pool->mutex);
+    return ptr;
 }
 
 size_t shared_queue_size(size_t size)
